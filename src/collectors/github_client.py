@@ -64,7 +64,10 @@ class GitHubClient:
             else:
                 break
 
-            if resp.status_code == 404:
+            # 404: not found / empty.
+            # 403: forbidden (e.g. torvalds/linux contributors — GitHub
+            # returns 403 when the contributor list is too large to page).
+            if resp.status_code in (403, 404):
                 break
             resp.raise_for_status()
 

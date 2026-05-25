@@ -47,24 +47,28 @@ def ensure_yolo_model(target_path: Path) -> Path:
     return target_path
 
 
-# Anime prompts target otaku / moe / bishoujo style Japanese anime —
-# NOT western cartoons, NOT generic 2D illustration.
+# "Anime" here means ANY drawn / illustrated / rendered character — not just
+# Japanese otaku style. Japanese anime, Studio Ghibli, western cartoons
+# (Disney/Pixar), 2D/3D illustration, digital paintings and photorealistic
+# AI/illustrated portraits all count as Anime, because the axis is
+# "illustrated / drawn art" vs "photograph of a real person".
 DEFAULT_ANIME_PROMPTS = [
-    "a japanese anime character face with large expressive eyes",
-    "a cute moe anime girl illustration",
-    "a bishoujo anime character in japanese manga style",
-    "a kawaii anime waifu character portrait",
-    "an otaku style japanese anime character drawing",
+    "a japanese anime or manga style character",
+    "a studio ghibli style animated character",
+    "a western cartoon character like disney or pixar",
+    "a 2d cartoon or comic illustration of a character",
+    "a digital illustration or drawn portrait of a person",
+    "a 3d rendered animated character or vtuber model",
+    "a stylized digital painting or ai-generated portrait",
 ]
-# Non-anime prompts cover real humans AND western / 3D / non-otaku art
-# so those images lose to the anime prompts only when the image is clearly
-# otaku-style.
+# "Human" means a photograph of a real person — INCLUDING edited / filtered /
+# retouched real photos. A real selfie with an anime or beauty filter is still
+# a transformed real photo, so it stays Human.
 DEFAULT_HUMAN_PROMPTS = [
     "a photograph of a real human face",
     "a selfie of a real person",
-    "a western cartoon character like pixar or disney",
-    "a 3d rendered animated movie character",
-    "a realistic digital portrait of a person",
+    "a real person photo with a beauty or color filter",
+    "an edited or retouched photo of a real person",
 ]
 
 
@@ -75,7 +79,9 @@ class ClassificationConfig:
     yolo_iou: float = 0.6
     clip_model_name: str = "ViT-B-32"
     clip_pretrained: str = "laion2b_s34b_b79k"
-    clip_anime_threshold: float = 0.75
+    # softmax over (anime + human) prompts sums to 1, so > 0.5 means the
+    # crop has more probability mass on "illustrated/drawn" than "real photo".
+    clip_anime_threshold: float = 0.5
     anime_prompts: list[str] = field(default_factory=lambda: list(DEFAULT_ANIME_PROMPTS))
     human_prompts: list[str] = field(default_factory=lambda: list(DEFAULT_HUMAN_PROMPTS))
     save_interval: int = 50
@@ -201,11 +207,22 @@ def classify_avatars(
     progress_path: Path,
     cfg: ClassificationConfig,
 ) -> pd.DataFrame:
-    """Classify avatars into {Default, Anime, Photo}.
+    """Classify avatars into {Default, Anime, Human, Other}.
 
-    Default comes from pre_classified_path. Anime requires both YOLO face
-    detection and CLIP zero-shot confirmation. Progress is saved incrementally
-    so interrupted runs resume from where they left off.
+    - Default: identified upstream by URL / pixel pre-filter.
+    - Anime: YOLO detects a face AND CLIP picks an illustration prompt
+      (Japanese anime, Ghibli, western cartoon, 2D/3D illustration,
+      digital painting, AI/illustrated portrait — any drawn art).
+    - Human: YOLO detects a face but CLIP picks a real-photo prompt
+      (a photograph of a real person, including edited / filtered photos).
+    - Other: YOLO did not detect a face — logos, scenery, abstract art,
+      anything without a recognizable face.
+
+    Progress is saved incrementally so interrupted runs resume from where
+    they left off. The bucketing rule above is applied at CSV-write time
+    over the cached (face_detected, clip_is_anime) signals, so re-running
+    this function after editing the rule reuses the existing progress
+    data without re-invoking YOLO or CLIP.
     """
     enriched = _load_json(enriched_path)
     pre_classified = _load_json(pre_classified_path)
@@ -249,8 +266,10 @@ def classify_avatars(
             clip_ok = r.get("clip_is_anime", False)
             if face and clip_ok:
                 profile_type = "Anime"
+            elif face:
+                profile_type = "Human"
             else:
-                profile_type = "Photo"
+                profile_type = "Other"
 
         repos = info.get("repos", {})
         primary_langs = repos.get("primary_languages", [])

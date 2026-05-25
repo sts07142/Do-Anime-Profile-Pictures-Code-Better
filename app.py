@@ -2,7 +2,7 @@
 Profile x Skill — GitHub x Codeforces Profile Image Analysis Dashboard
 
 v2 analysis:
-  - yolov8_animeface 3-way classification (Anime / Default / Photo)
+  - yolov8_animeface 4-way classification (Anime / Human / Other / Default)
   - RQ1 (GitHub) & RQ2 (Codeforces): Unified 4-tab structure
     [Distribution -> Group Comparison -> Statistical Tests -> Cross Analysis]
 
@@ -10,6 +10,7 @@ Privacy: No username/handle/avatar URL/location exposed. SHA-256 8-char anonymou
 """
 import hashlib
 import json
+import sys
 from itertools import combinations
 from pathlib import Path
 
@@ -20,6 +21,16 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 from scipy import stats
+
+# Make src/ packages importable so we can use src/analysis/geo.py
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+from analysis.geo import (  # noqa: E402
+    all_countries,
+    all_regions,
+    country_name,
+    country_to_region,
+    detect_country,
+)
 
 # -- Page Config -------------------------------------------------------
 st.set_page_config(
@@ -46,17 +57,28 @@ st.markdown("""
 DATA_DIR = Path(__file__).resolve().parent / 'data'
 RAW_DIR = DATA_DIR / 'raw'
 PROC_DIR = DATA_DIR / 'processed'
-CSV_3CAT_PATH = PROC_DIR / 'classified_3cat.csv'
+CSV_PATH = PROC_DIR / 'classified_4cat.csv'
+# Pre-merged GitHub table (classification + enriched metrics + contributions +
+# region). Self-contained, so the dashboard does not depend on the large raw
+# JSONs. If present it is used directly; otherwise we fall back to merging the
+# 4-cat CSV with the enriched/contributions JSONs below.
+ENRICHED_CSV_PATH = PROC_DIR / 'classified_4cat_enriched.csv'
 CF_CSV_PATH = PROC_DIR / 'codeforces_classified.csv'
 ENRICHED_PATH = RAW_DIR / 'enriched_users.json'
 CONTRIB_PATH = RAW_DIR / 'contributions.json'
 
-# Korean -> English label mapping (CSV data uses Korean labels)
-LABEL_MAP = {'애니': 'Anime', '기본': 'Default', '일반': 'Photo'}
+# Korean -> English label mapping (legacy CSVs may use Korean labels)
+LABEL_MAP = {'애니': 'Anime', '기본': 'Default'}
 LABEL_MAP_INV = {v: k for k, v in LABEL_MAP.items()}
 
-COLORS_3CAT = {'Anime': '#ff6b6b', 'Default': '#c0c0c0', 'Photo': '#4ecdc4'}
-ORDER_3CAT = ['Anime', 'Photo', 'Default']
+# 4-cat color + ordering — both GitHub and Codeforces CSVs share this schema.
+COLORS = {
+    'Anime': '#ff6b6b',
+    'Human': '#4ecdc4',   # YOLO face + CLIP human
+    'Other': '#95a5a6',   # no YOLO face
+    'Default': '#c0c0c0',
+}
+ORDER = ['Anime', 'Human', 'Other', 'Default']
 RANK_ORDER = [
     'newbie', 'pupil', 'specialist', 'expert', 'candidate master',
     'master', 'international master', 'grandmaster',
@@ -108,8 +130,8 @@ def kpi_card(col, label, value, delta=None, help=None):
 
 def chart_distribution_histogram(df, metric, title, nbins=60):
     fig = px.histogram(df, x=metric, color='profile_type',
-                        category_orders={'profile_type': ORDER_3CAT},
-                        color_discrete_map=COLORS_3CAT,
+                        category_orders={'profile_type': ORDER},
+                        color_discrete_map=COLORS,
                         marginal='box', barmode='overlay', opacity=0.55,
                         nbins=nbins, title=title)
     fig.update_layout(height=420, legend_title_text='PFP Type')
@@ -118,8 +140,8 @@ def chart_distribution_histogram(df, metric, title, nbins=60):
 
 def chart_distribution_ecdf(df, metric, title):
     fig = px.ecdf(df, x=metric, color='profile_type',
-                   category_orders={'profile_type': ORDER_3CAT},
-                   color_discrete_map=COLORS_3CAT, title=title)
+                   category_orders={'profile_type': ORDER},
+                   color_discrete_map=COLORS, title=title)
     fig.update_traces(line=dict(width=3))
     fig.update_layout(height=380, legend_title_text='PFP Type')
     return fig
@@ -127,8 +149,8 @@ def chart_distribution_ecdf(df, metric, title):
 
 def chart_distribution_violin(df, metric, title):
     fig = px.violin(df, x='profile_type', y=metric, color='profile_type',
-                     category_orders={'profile_type': ORDER_3CAT},
-                     color_discrete_map=COLORS_3CAT, box=True, points=False,
+                     category_orders={'profile_type': ORDER},
+                     color_discrete_map=COLORS, box=True, points=False,
                      title=title)
     fig.update_layout(height=420, showlegend=False)
     return fig
@@ -137,12 +159,12 @@ def chart_distribution_violin(df, metric, title):
 def chart_binned_stacked(df, bin_col, bin_order, title, bin_label="Bin"):
     ct = pd.crosstab(df[bin_col], df['profile_type'], normalize='index') * 100
     ct = ct.reindex([b for b in bin_order if b in ct.index])
-    ct = ct[[c for c in ORDER_3CAT if c in ct.columns]]
+    ct = ct[[c for c in ORDER if c in ct.columns]]
     long = ct.reset_index().melt(id_vars=bin_col, var_name='profile_type', value_name='pct')
     fig = px.bar(long, x=bin_col, y='pct', color='profile_type',
-                  category_orders={'profile_type': ORDER_3CAT,
+                  category_orders={'profile_type': ORDER,
                                     bin_col: [b for b in bin_order if b in ct.index]},
-                  color_discrete_map=COLORS_3CAT, barmode='stack',
+                  color_discrete_map=COLORS, barmode='stack',
                   title=title, text_auto='.1f',
                   labels={'pct': 'Ratio (%)', bin_col: bin_label})
     fig.update_layout(xaxis_tickangle=-25, height=440, legend_title_text='PFP Type')
@@ -154,7 +176,7 @@ def chart_binned_lines(df, bin_col, bin_order, title, bin_label="Bin"):
     ordered_bins = [b for b in bin_order if b in ct.index]
     ct = ct.reindex(ordered_bins)
     fig = go.Figure()
-    for ptype in ORDER_3CAT:
+    for ptype in ORDER:
         if ptype not in ct.columns:
             continue
         vals = ct[ptype]
@@ -164,7 +186,7 @@ def chart_binned_lines(df, bin_col, bin_order, title, bin_label="Bin"):
             name=ptype,
             text=[f"{v:.1f}" for v in vals.values],
             textposition='top center',
-            line=dict(color=COLORS_3CAT[ptype], width=3),
+            line=dict(color=COLORS[ptype], width=3),
             marker=dict(size=11, line=dict(color='white', width=1.5)),
         ))
     fig.update_layout(
@@ -183,7 +205,7 @@ def chart_median_iqr_grid(df, metrics, title="Median +/- IQR (Q1~Q3) Comparison"
                          horizontal_spacing=0.10, vertical_spacing=0.18)
     for i, m in enumerate(metrics):
         r, c = i // cols + 1, i % cols + 1
-        for t in ORDER_3CAT:
+        for t in ORDER:
             s = df[df['profile_type']==t][m].dropna()
             if len(s) == 0: continue
             med, q1, q3 = s.median(), s.quantile(0.25), s.quantile(0.75)
@@ -191,7 +213,7 @@ def chart_median_iqr_grid(df, metrics, title="Median +/- IQR (Q1~Q3) Comparison"
                 x=[t], y=[med],
                 error_y=dict(type='data', symmetric=False,
                              array=[q3 - med], arrayminus=[med - q1]),
-                marker_color=COLORS_3CAT[t], name=t, showlegend=(i == 0),
+                marker_color=COLORS[t], name=t, showlegend=(i == 0),
                 text=f"{med:.0f}<br>IQR {q1:.0f}-{q3:.0f}",
                 textposition='outside', hovertemplate='%{x}<br>median=%{y:.0f}<extra></extra>',
             ), row=r, col=c)
@@ -203,7 +225,7 @@ def chart_median_iqr_grid(df, metrics, title="Median +/- IQR (Q1~Q3) Comparison"
 def chart_percentile_curve(df, metric, title=None):
     percentiles = [10, 25, 50, 75, 90, 95, 99]
     rows = []
-    for t in ORDER_3CAT:
+    for t in ORDER:
         s = df[df['profile_type']==t][metric].dropna()
         if len(s) == 0: continue
         for p in percentiles:
@@ -211,8 +233,8 @@ def chart_percentile_curve(df, metric, title=None):
     pct_df = pd.DataFrame(rows)
     fig = px.line(pct_df, x='percentile', y='value', color='profile_type',
                    markers=True,
-                   category_orders={'profile_type': ORDER_3CAT},
-                   color_discrete_map=COLORS_3CAT,
+                   category_orders={'profile_type': ORDER},
+                   color_discrete_map=COLORS,
                    title=title or f"{metric} Percentile Curve")
     fig.update_traces(line=dict(width=3), marker=dict(size=10))
     fig.update_layout(height=420, legend_title_text='PFP Type')
@@ -225,10 +247,10 @@ def chart_activity_quantile_lines(df, metric, n_bins=10, title=None):
     df_s['_rank'] = df_s[metric].rank(method='first')
     df_s['quantile'] = pd.qcut(df_s['_rank'], n_bins, labels=range(1, n_bins + 1))
     ct = pd.crosstab(df_s['quantile'], df_s['profile_type'], normalize='index') * 100
-    ct = ct[[c for c in ORDER_3CAT if c in ct.columns]]
+    ct = ct[[c for c in ORDER if c in ct.columns]]
 
     fig = go.Figure()
-    for ptype in ORDER_3CAT:
+    for ptype in ORDER:
         if ptype not in ct.columns: continue
         vals = ct[ptype]
         fig.add_trace(go.Scatter(
@@ -236,7 +258,7 @@ def chart_activity_quantile_lines(df, metric, n_bins=10, title=None):
             mode='lines+markers+text', name=ptype,
             text=[f"{v:.1f}" for v in vals.values],
             textposition='top center' if ptype == 'Anime' else 'bottom center',
-            line=dict(color=COLORS_3CAT[ptype], width=3),
+            line=dict(color=COLORS[ptype], width=3),
             marker=dict(size=11, line=dict(color='white', width=1.5)),
         ))
     bounds = df.groupby(pd.qcut(df[metric].rank(method='first'), n_bins,
@@ -267,7 +289,7 @@ def chart_topN_cumulative(df, metric, title=None):
         k = max(1, int(n * top_pct / 100))
         top = sub.head(k)
         vc = top['profile_type'].value_counts(normalize=True) * 100
-        for ptype in ORDER_3CAT:
+        for ptype in ORDER:
             rows.append({
                 'top_pct': top_pct,
                 'profile_type': ptype,
@@ -276,14 +298,14 @@ def chart_topN_cumulative(df, metric, title=None):
             })
     plot = pd.DataFrame(rows)
     fig = go.Figure()
-    for ptype in ORDER_3CAT:
+    for ptype in ORDER:
         sub_p = plot[plot['profile_type'] == ptype]
         fig.add_trace(go.Scatter(
             x=sub_p['top_pct'], y=sub_p['pct'],
             mode='lines+markers+text', name=ptype,
             text=[f"{v:.1f}" for v in sub_p['pct']],
             textposition='top center' if ptype == 'Anime' else 'bottom center',
-            line=dict(color=COLORS_3CAT[ptype], width=3),
+            line=dict(color=COLORS[ptype], width=3),
             marker=dict(size=11, line=dict(color='white', width=1.5)),
             customdata=sub_p[['n']],
             hovertemplate=f"<b>{ptype}</b><br>Top %{{x}}%: %{{y:.1f}}%%<br>n=%{{customdata[0]:,}}<extra></extra>",
@@ -318,7 +340,7 @@ def build_kw_mw_table(df, metrics):
     rows = []
     for m in metrics:
         try:
-            h, p_kw = stats.kruskal(*[df[df['profile_type']==t][m].dropna() for t in ORDER_3CAT])
+            h, p_kw = stats.kruskal(*[df[df['profile_type']==t][m].dropna() for t in ORDER])
             d, p_mw = cliff_delta(anime[m].dropna(), non_anime[m].dropna())
             rows.append({
                 'Metric': m, 'KW H': round(h, 1), 'KW p': f'{p_kw:.2e}',
@@ -335,7 +357,7 @@ def build_kw_mw_table(df, metrics):
 def build_posthoc_table(df, metric):
     """Pairwise post-hoc test (Bonferroni correction)"""
     rows = []
-    for g1, g2 in combinations(ORDER_3CAT, 2):
+    for g1, g2 in combinations(ORDER, 2):
         x = df[df['profile_type']==g1][metric].dropna()
         y = df[df['profile_type']==g2][metric].dropna()
         if len(x) == 0 or len(y) == 0: continue
@@ -355,7 +377,7 @@ def build_posthoc_table(df, metric):
 def kpi_row(df, total_label="Filtered Users"):
     col1, col2, col3, col4 = st.columns(4)
     kpi_card(col1, total_label, f"{len(df):,}")
-    for col, ptype in zip([col2, col3, col4], ORDER_3CAT):
+    for col, ptype in zip([col2, col3, col4], ORDER):
         n = (df['profile_type'] == ptype).sum()
         kpi_card(col, f"{ptype}", f"{n:,}", f"{n/max(len(df),1)*100:.1f}%")
 
@@ -363,9 +385,12 @@ def kpi_row(df, total_label="Filtered Users"):
 # -- Data Loaders -------------------------------------------------------
 @st.cache_data(show_spinner="Loading GitHub data...")
 def load_gh():
-    if not CSV_3CAT_PATH.exists():
+    # Prefer the self-contained pre-merged table when available.
+    if ENRICHED_CSV_PATH.exists():
+        return remap_labels(pd.read_csv(ENRICHED_CSV_PATH))
+    if not CSV_PATH.exists():
         return None
-    df = remap_labels(pd.read_csv(CSV_3CAT_PATH))
+    df = remap_labels(pd.read_csv(CSV_PATH))
 
     if ENRICHED_PATH.exists():
         with open(ENRICHED_PATH) as f:
@@ -379,9 +404,14 @@ def load_gh():
                 'total_forks': u.get('repos', {}).get('total_forks_received', 0),
                 'activity_grade': u.get('activity_grade'),
                 'sampling_group': u.get('sampling_group'),
+                # Coarse country derived from free-text location. Raw
+                # `location` itself is NEVER attached to the dataframe — only
+                # the ISO-2 code and continental region propagate.
+                'country_code': detect_country(u.get('location')),
             }
             for u in enriched.values()
         ])
+        metrics_df['region'] = metrics_df['country_code'].apply(country_to_region)
         df = df.merge(metrics_df, on='uid', how='left')
 
     if CONTRIB_PATH.exists():
@@ -405,24 +435,73 @@ def load_gh():
 
 @st.cache_data(show_spinner="Loading Codeforces data...")
 def load_cf():
-    if CF_CSV_PATH.exists():
-        return remap_labels(pd.read_csv(CF_CSV_PATH))
-    return None
+    if not CF_CSV_PATH.exists():
+        return None
+    df = remap_labels(pd.read_csv(CF_CSV_PATH))
+    # Codeforces provides a country string (already structured); convert to
+    # ISO-2 via the same detector used for GitHub locations, then map to
+    # region. Falls through gracefully on missing/unmatched values.
+    if 'country' in df.columns:
+        df['country_code'] = df['country'].apply(detect_country)
+    if 'country_code' in df.columns:
+        df['region'] = df['country_code'].apply(country_to_region)
+    return df
 
 
-gh = load_gh()
-cf = load_cf()
-gh_n = len(gh) if gh is not None else 0
-cf_n = len(cf) if cf is not None else 0
+gh_full = load_gh()
+cf_full = load_cf()
+gh_full_n = len(gh_full) if gh_full is not None else 0
+cf_full_n = len(cf_full) if cf_full is not None else 0
 
 
 # -- Sidebar ------------------------------------------------------------
 st.sidebar.markdown("# 🎭 Profile x Skill")
 st.sidebar.caption("Correlation between PFP type and developer skills")
 st.sidebar.markdown("---")
+
+# Geography filter — applied to both GH and CF dataframes before any page
+# renders. Country detection is best-effort substring matching from free-text
+# location (GH) or structured `country` field (CF). Unmatched users are
+# excluded from "Region"/"Country" filters but counted in "All".
+st.sidebar.markdown("**🌍 Geography filter**")
+geo_mode = st.sidebar.radio(
+    "Filter by", ["All", "Region", "Country"], horizontal=True,
+    label_visibility="collapsed",
+)
+gh, cf = gh_full, cf_full
+if geo_mode == "Region":
+    sel_regions = st.sidebar.multiselect(
+        "Regions", all_regions(), default=all_regions(),
+    )
+    if gh is not None:
+        gh = gh[gh.get('region').isin(sel_regions)] if 'region' in gh.columns else gh.iloc[0:0]
+    if cf is not None:
+        cf = cf[cf.get('region').isin(sel_regions)] if 'region' in cf.columns else cf.iloc[0:0]
+elif geo_mode == "Country":
+    code_to_name = {c: n for c, n in all_countries()}
+    name_to_code = {n: c for c, n in all_countries()}
+    sel_names = st.sidebar.multiselect(
+        "Countries", [n for _, n in all_countries()],
+    )
+    sel_codes = [name_to_code[n] for n in sel_names]
+    if sel_codes:
+        if gh is not None:
+            gh = gh[gh.get('country_code').isin(sel_codes)] if 'country_code' in gh.columns else gh.iloc[0:0]
+        if cf is not None:
+            cf = cf[cf.get('country_code').isin(sel_codes)] if 'country_code' in cf.columns else cf.iloc[0:0]
+gh_n = len(gh) if gh is not None else 0
+cf_n = len(cf) if cf is not None else 0
+
+st.sidebar.markdown("---")
 col_a, col_b = st.sidebar.columns(2)
-col_a.metric("GitHub", f"{gh_n:,}")
-col_b.metric("Codeforces", f"{cf_n:,}")
+col_a.metric("GitHub",
+             f"{gh_n:,}",
+             delta=f"of {gh_full_n:,}" if gh_n != gh_full_n else None,
+             delta_color="off")
+col_b.metric("Codeforces",
+             f"{cf_n:,}",
+             delta=f"of {cf_full_n:,}" if cf_n != cf_full_n else None,
+             delta_color="off")
 st.sidebar.markdown("---")
 
 page = st.sidebar.radio("Navigate", [
@@ -430,11 +509,12 @@ page = st.sidebar.radio("Navigate", [
     "GitHub Analysis (RQ1)",
     "Codeforces Analysis (RQ2)",
     "Cross-Platform",
+    "🌐 Region Compare",
 ], label_visibility="collapsed")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("All personal identifiers are SHA-256 hashed.")
-st.sidebar.caption("All charts always show **Anime / Photo / Default** together.")
+st.sidebar.caption("Charts show **Anime / Human / Other / Default** for both GitHub and Codeforces (4-cat).")
 
 
 # =====================================================================
@@ -446,7 +526,7 @@ if page == "Overview":
     st.markdown("""
     <div class="caption-box">
       <b>Research Question</b>: Is there a statistically significant <b>correlation</b>
-      between a developer's profile image type (Anime / Default / Photo) and their
+      between a developer's profile image type (Anime / Human / Other / Default) and their
       activity & skill metrics?
       <br><br>
       This study analyzes <b>correlations only</b> and does not claim causation.
@@ -455,22 +535,22 @@ if page == "Overview":
 
     st.subheader("Dataset Summary")
     col1, col2, col3, col4 = st.columns(4)
-    kpi_card(col1, "GitHub Users", f"{gh_n:,}", help="6 stratified sampling groups")
+    kpi_card(col1, "GitHub Users", f"{gh_n:,}", help="8 stratified sampling groups (incl. ml_ai, trending)")
     kpi_card(col2, "Codeforces Users", f"{cf_n:,}", help="activeOnly rated users")
     kpi_card(col3, "Total Sample", f"{gh_n + cf_n:,}")
     kpi_card(col4, "Platforms", "2")
 
     st.markdown("---")
 
-    st.subheader("3-Way Classification Distribution")
+    st.subheader("Profile Type Classification Distribution")
     col1, col2 = st.columns(2)
     for col, df, name in [(col1, gh, f"GitHub (n={gh_n:,})"),
                            (col2, cf, f"Codeforces (n={cf_n:,})")]:
         if df is None: continue
-        vc = df['profile_type'].value_counts().reindex(ORDER_3CAT).fillna(0).reset_index()
+        vc = df['profile_type'].value_counts().reindex(ORDER).fillna(0).reset_index()
         vc.columns = ['profile_type', 'count']
         fig = px.pie(vc, names='profile_type', values='count', hole=0.55,
-                      color='profile_type', color_discrete_map=COLORS_3CAT, title=name)
+                      color='profile_type', color_discrete_map=COLORS, title=name)
         fig.update_traces(textposition='inside', textinfo='percent+label', textfont_size=14)
         fig.update_layout(showlegend=False, height=380, margin=dict(t=50, b=10))
         col.plotly_chart(fig, width='stretch')
@@ -482,19 +562,103 @@ if page == "Overview":
             'Total': [gh_n, cf_n],
             'Anime (%)': [(gh['profile_type']=='Anime').mean()*100,
                         (cf['profile_type']=='Anime').mean()*100],
-            'Photo (%)': [(gh['profile_type']=='Photo').mean()*100,
-                        (cf['profile_type']=='Photo').mean()*100],
+            'Human (%)': [(gh['profile_type']=='Human').mean()*100,
+                        (cf['profile_type']=='Human').mean()*100],
+            'Other (%)': [(gh['profile_type']=='Other').mean()*100,
+                        (cf['profile_type']=='Other').mean()*100],
             'Default (%)': [(gh['profile_type']=='Default').mean()*100,
                         (cf['profile_type']=='Default').mean()*100],
         }).round(1)
         st.dataframe(comp, width='stretch', hide_index=True)
 
     st.markdown("---")
-    st.subheader("Key Findings")
+    if gh is not None and 'total_contributions' in gh.columns:
+        st.subheader("Headline metric — GitHub `total_contributions` by PFP")
+        st.caption(
+            "Median GitHub contributions in the last year (commits + PRs + issues + reviews)."
+            " Default is bucketed separately because it has near-zero activity by construction."
+        )
+        gh_tc = gh[gh['total_contributions'].notna()].copy()
+        med = gh_tc.groupby('profile_type', observed=True)['total_contributions'].median()
+        med = med.reindex(ORDER)
+        counts = gh_tc.groupby('profile_type', observed=True).size().reindex(ORDER).fillna(0).astype(int)
+
+        c1, c2, c3, c4 = st.columns(4)
+        for col, ptype in zip([c1, c2, c3, c4], ORDER):
+            v = med.get(ptype)
+            n = counts.get(ptype, 0)
+            col.metric(
+                f"{ptype} (n={n:,})",
+                "—" if pd.isna(v) else f"{int(v):,}",
+                help=f"Median total_contributions for {ptype}",
+            )
+
+        # Anime vs NonAnime, and Anime vs Human (direct comparison)
+        anime = gh_tc[gh_tc['profile_type'] == 'Anime']['total_contributions'].to_numpy()
+        non_anime = gh_tc[gh_tc['profile_type'] != 'Anime']['total_contributions'].to_numpy()
+        human = gh_tc[gh_tc['profile_type'] == 'Human']['total_contributions'].to_numpy()
+        if len(anime) and len(non_anime):
+            d1, p1 = cliff_delta(pd.Series(anime), pd.Series(non_anime))
+        else:
+            d1, p1 = float('nan'), float('nan')
+        if len(anime) and len(human):
+            d2, p2 = cliff_delta(pd.Series(anime), pd.Series(human))
+        else:
+            d2, p2 = float('nan'), float('nan')
+        a, b = st.columns(2)
+        a.metric(
+            "Anime vs NonAnime — Cliff's δ",
+            f"{d1:+.3f}" if not pd.isna(d1) else "—",
+            delta=f"{effect_label(d1) if not pd.isna(d1) else ''}  p={p1:.1e}",
+            delta_color="off",
+        )
+        b.metric(
+            "Anime vs Human — Cliff's δ",
+            f"{d2:+.3f}" if not pd.isna(d2) else "—",
+            delta=f"{effect_label(d2) if not pd.isna(d2) else ''}  p={p2:.1e}",
+            delta_color="off",
+        )
+
+        med_df = pd.DataFrame({'profile_type': ORDER, 'median': med.values})
+        fig = px.bar(
+            med_df, x='profile_type', y='median', color='profile_type',
+            category_orders={'profile_type': ORDER},
+            color_discrete_map=COLORS, text='median',
+            labels={'median': 'median total_contributions'},
+            title="Median total_contributions per category (last year)",
+        )
+        fig.update_traces(textposition='outside')
+        fig.update_layout(height=380, showlegend=False)
+        st.plotly_chart(fig, width='stretch')
+
+    st.markdown("---")
+    st.subheader("Key Findings (updated)")
     c1, c2, c3 = st.columns(3)
-    c1.info("**RQ1 (GitHub)**\n\nAnime PFP users score higher on followers / stars / repos (Cliff's δ ≈ 0.17–0.23, small effect)")
-    c2.warning("**RQ2 (Codeforces)**\n\nAnime ratio rises with rank: newbie 18.4% → grandmaster 38.4% (tapers off at top tiers)")
-    c3.success("**Cross-Validation**\n\nDirection is consistent across two independent platforms, though absolute anime share differs (GitHub 5.9% vs CF 22.3%)")
+    c1.info(
+        "**GitHub activity: Anime ≈ Human**\n\n"
+        "GitHub `total_contributions` Anime vs Human Cliff's δ = **−0.029** "
+        "(negligible). Anime's edge over NonAnime (δ = +0.234, small) is almost "
+        "entirely driven by the Default bucket having ~0 contributions."
+    )
+    c2.warning(
+        "**CF skill: a small Anime edge**\n\n"
+        "After CLIP-verifying CF Anime, median CF rating: Anime **1,204** / "
+        "Human 1,064 / Other 1,162. Anime vs Human δ = **+0.184 (small)** — the "
+        "one place the pattern diverges from GitHub (partly a composition effect)."
+    )
+    c3.success(
+        "**Robust to ~20% mislabeling**\n\n"
+        "Sensitivity (5 scenarios incl. 20% random Anime↔Human flips) keeps "
+        "GitHub Anime vs Human *negligible* and CF *small* across every scenario. "
+        "See `data/processed/analysis_sensitivity.md`."
+    )
+
+    st.caption(
+        "⚠️ The earlier framing 'Anime PFP users score higher' survives only "
+        "in the trivial sense that *any* PFP beats *no* PFP. Once Default is "
+        "excluded, Anime users are statistically indistinguishable from Human "
+        "/ Other on both GitHub activity and CF rating."
+    )
 
 
 # =====================================================================
@@ -505,7 +669,7 @@ elif page == "GitHub Analysis (RQ1)":
     st.caption("Correlation between GitHub PFP type and open-source activity metrics")
 
     if gh is None:
-        st.error(f"`{CSV_3CAT_PATH}` not found. Run notebook 01 first.")
+        st.error(f"`{CSV_PATH}` not found. Run notebook 01 first.")
         st.stop()
 
     BASE_METRICS = ['followers', 'total_stars', 'public_repos', 'total_forks']
@@ -789,7 +953,7 @@ elif page == "Codeforces Analysis (RQ2)":
         pivot = pd.crosstab(cff_rank['rank'], cff_rank['profile_type'], normalize='index') * 100
         ranks_avail = [r for r in RANK_ORDER if r in pivot.index]
         pivot = pivot.reindex(ranks_avail)
-        cols_avail = [c for c in ORDER_3CAT if c in pivot.columns]
+        cols_avail = [c for c in ORDER if c in pivot.columns]
         pivot = pivot[cols_avail]
         fig = px.imshow(pivot, text_auto='.1f', aspect='auto',
                          color_continuous_scale='RdBu_r',
@@ -814,9 +978,9 @@ elif page == "Cross-Platform":
     fig = make_subplots(rows=1, cols=2, specs=[[{'type':'domain'}, {'type':'domain'}]],
                          subplot_titles=[f"GitHub (n={gh_n:,})", f"Codeforces (n={cf_n:,})"])
     for i, src in enumerate([gh, cf]):
-        vc = src['profile_type'].value_counts().reindex(ORDER_3CAT).fillna(0)
+        vc = src['profile_type'].value_counts().reindex(ORDER).fillna(0)
         fig.add_trace(go.Pie(labels=vc.index, values=vc.values, hole=0.55,
-                              marker=dict(colors=[COLORS_3CAT[t] for t in vc.index]),
+                              marker=dict(colors=[COLORS[t] for t in vc.index]),
                               textinfo='percent+label'), row=1, col=i+1)
     fig.update_layout(height=450)
     st.plotly_chart(fig, width='stretch')
@@ -840,7 +1004,8 @@ elif page == "Cross-Platform":
 
     fig = px.bar(eff_df, x='Metric', y="Cliff's δ", color='Platform', barmode='group',
                   text="Cliff's δ",
-                  title="Positive on both platforms → Anime PFP users consistently score higher",
+                  title="Anime vs NonAnime δ — small (~0.2) and platform-consistent, "
+                        "but driven by the Default bucket (see Anime vs Human in analysis_total_contrib.md)",
                   color_discrete_map={'GitHub': '#2b7a78', 'Codeforces': '#e76f51'})
     fig.add_hline(y=0.147, line_dash='dot', annotation_text='small', line_color='gray')
     fig.add_hline(y=0.33, line_dash='dot', annotation_text='medium', line_color='gray')
@@ -854,9 +1019,9 @@ elif page == "Cross-Platform":
     with col1:
         thresh = gh['followers'].quantile(0.9)
         top_gh = gh[gh['followers'] >= thresh]
-        vc_gh = top_gh['profile_type'].value_counts(normalize=True).reindex(ORDER_3CAT).fillna(0) * 100
+        vc_gh = top_gh['profile_type'].value_counts(normalize=True).reindex(ORDER).fillna(0) * 100
         fig = px.bar(x=vc_gh.index, y=vc_gh.values, color=vc_gh.index,
-                      color_discrete_map=COLORS_3CAT,
+                      color_discrete_map=COLORS,
                       labels={'x': 'PFP Type', 'y': 'Ratio (%)'},
                       title=f'GitHub Top 10% by Followers (n={len(top_gh):,})',
                       text=[f"{v:.1f}%" for v in vc_gh.values])
@@ -865,9 +1030,9 @@ elif page == "Cross-Platform":
     with col2:
         thresh = cf['rating'].quantile(0.9)
         top_cf = cf[cf['rating'] >= thresh]
-        vc_cf = top_cf['profile_type'].value_counts(normalize=True).reindex(ORDER_3CAT).fillna(0) * 100
+        vc_cf = top_cf['profile_type'].value_counts(normalize=True).reindex(ORDER).fillna(0) * 100
         fig = px.bar(x=vc_cf.index, y=vc_cf.values, color=vc_cf.index,
-                      color_discrete_map=COLORS_3CAT,
+                      color_discrete_map=COLORS,
                       labels={'x': 'PFP Type', 'y': 'Ratio (%)'},
                       title=f'Codeforces Top 10% by Rating (n={len(top_cf):,})',
                       text=[f"{v:.1f}%" for v in vc_cf.values])
@@ -880,7 +1045,7 @@ elif page == "Cross-Platform":
     for name, src, metric in [('GitHub', gh, 'followers'), ('Codeforces', cf, 'rating')]:
         s = src.assign(percentile=pd.qcut(src[metric].rank(method='first'),
                                             bins, labels=range(bins)))
-        for ptype in ORDER_3CAT:
+        for ptype in ORDER:
             pct = s.groupby('percentile', observed=True).apply(
                 lambda x: (x['profile_type']==ptype).mean()*100).reset_index(name='pct')
             pct['Platform'] = name
@@ -891,8 +1056,8 @@ elif page == "Cross-Platform":
 
     fig = px.line(combined, x='percentile', y='pct', color='profile_type',
                    line_dash='Platform', markers=True,
-                   category_orders={'profile_type': ORDER_3CAT},
-                   color_discrete_map=COLORS_3CAT,
+                   category_orders={'profile_type': ORDER},
+                   color_discrete_map=COLORS,
                    title='PFP type ratio by quantile — solid=GitHub, dashed=Codeforces',
                    labels={'percentile': 'Percentile', 'pct': 'Ratio (%)'})
     fig.update_traces(line=dict(width=3), marker=dict(size=9))
@@ -903,11 +1068,168 @@ elif page == "Cross-Platform":
     st.markdown("""
     | Observation | GitHub | Codeforces |
     |-------------|--------|-----------|
-    | Anime PFP ratio | 5.9% | 22.3% |
-    | Anime vs Non-anime effect | small (δ ≈ 0.17–0.23) | small (δ ≈ 0.21) |
-    | Higher quantile → Anime ratio | Increasing trend | newbie 18.4% → GM 38.4% (tapers at top tiers) |
+    | Anime PFP share | 14.3% | 17.8% |
+    | Human PFP share | 34.6% | 8.7% |
+    | Anime vs NonAnime δ (headline metric) | +0.23 (small) on total_contributions | +0.27 (small) on rating |
+    | **Anime vs Human δ (headline metric)** | **−0.03 (negligible)** | **+0.18 (small)** |
+    | Sensitivity to 20% label noise | Anime vs Human stays negligible | Anime vs Human stays small (stable) |
     """)
-    st.success("**Conclusion**: 'Anime PFP tends toward higher activity/skill metrics' — direction is consistent across two independent platforms, though the effect size is small (Cliff's δ ≈ 0.17–0.23).")
-    st.warning("**Caveat**: Correlation ≠ Causation. Confounding variables (culture, experience, region) may exist.")
+    st.success(
+        "**Headline**: On GitHub **activity** (`total_contributions`), once "
+        "Default-PFP users are excluded Anime users are **statistically "
+        "indistinguishable** from Human/Other (δ = −0.03) — the 'Anime = higher "
+        "activity' meme is the Default-vs-everyone-else gap in disguise. On "
+        "Codeforces **skill** (`rating`), after CLIP-verifying CF Anime, Anime "
+        "shows a **small but robust edge over Human** (δ = +0.18). Both hold "
+        "under ~20% classification noise (see `analysis_sensitivity.md`)."
+    )
+    st.warning("**Caveat**: Correlation ≠ Causation. Region, sampling group, account age, and primary language are known confounders (`analyze_4cat.py` already shows sampling-group × PFP is non-negligible). A proper multivariate regression with these controls is future work.")
 
+
+# =====================================================================
+# REGION COMPARE — same metric across all regions simultaneously
+# =====================================================================
+elif page == "🌐 Region Compare":
+    st.title("🌐 Region Compare")
+    st.caption(
+        "Same metric, every region side-by-side. Ignores the sidebar geo filter — "
+        "this page is *for* the cross-region comparison."
+    )
+
+    if gh_full is None and cf_full is None:
+        st.error("No data loaded. Run notebooks 01 and 05 first.")
+        st.stop()
+
+    platform = st.radio("Platform", ["GitHub", "Codeforces"], horizontal=True, key='regcmp_pf')
+    src_full = gh_full if platform == "GitHub" else cf_full
+    if src_full is None or 'region' not in src_full.columns:
+        st.error(f"`region` column missing on {platform}. "
+                 "Check that location/country parsing populated it.")
+        st.stop()
+
+    # Bucket all rows: detected region OR "Unknown".
+    src = src_full.copy()
+    src['region'] = src['region'].fillna('Unknown')
+
+    REGION_ORDER_DASH = [
+        "East Asia", "Southeast Asia", "South Asia", "Middle East",
+        "Europe", "North America", "Latin America", "Oceania", "Africa",
+        "Unknown",
+    ]
+    available_regions = [r for r in REGION_ORDER_DASH if r in src['region'].unique()]
+    # "All" bucket = union of every region (= the full dataset).
+    all_row = src.copy()
+    all_row['region'] = 'All'
+    panel_src = pd.concat([all_row, src], ignore_index=True)
+    panel_order = ['All'] + available_regions
+
+    # Per-region n badge
+    n_per_region = panel_src['region'].value_counts().reindex(panel_order)
+    cols = st.columns(min(len(panel_order), 6))
+    for i, region in enumerate(panel_order):
+        cols[i % len(cols)].metric(region, f"{int(n_per_region.get(region, 0)):,}")
+
+    st.markdown("---")
+    st.subheader("1. 4-cat distribution (%) per region — small multiples")
+    st.caption(
+        "Each bar shows the PFP-type composition within that region. "
+        "Compare bar heights across panels."
+    )
+
+    # Build long-form % crosstab
+    ct = pd.crosstab(panel_src['region'], panel_src['profile_type'], normalize='index') * 100
+    ct = ct.reindex(index=panel_order, columns=[c for c in ORDER if c in ct.columns])
+    long = ct.reset_index().melt(id_vars='region', var_name='profile_type', value_name='pct')
+    fig = px.bar(
+        long, x='profile_type', y='pct', color='profile_type',
+        category_orders={'profile_type': ORDER, 'region': panel_order},
+        color_discrete_map=COLORS, facet_col='region', facet_col_wrap=5,
+        text_auto='.1f', title=f"{platform} — 4-cat share by region",
+        labels={'pct': 'Share (%)', 'profile_type': ''},
+    )
+    fig.update_layout(height=520, showlegend=False)
+    fig.for_each_annotation(lambda a: a.update(text=a.text.split('=')[-1]))
+    st.plotly_chart(fig, width='stretch')
+
+    st.markdown("---")
+    st.subheader("2. Anime share by region — direct comparison")
+    anime_share = (panel_src['profile_type'] == 'Anime').groupby(panel_src['region']).mean() * 100
+    anime_share = anime_share.reindex(panel_order)
+    fig = px.bar(
+        x=anime_share.index, y=anime_share.values,
+        color=anime_share.index,
+        labels={'x': 'Region', 'y': 'Anime share (%)'},
+        title=f"{platform} — Anime PFP share by region",
+        text=[f"{v:.1f}%" for v in anime_share.values],
+    )
+    fig.update_traces(textposition='outside')
+    fig.update_layout(height=420, showlegend=False, xaxis_tickangle=-25)
+    st.plotly_chart(fig, width='stretch')
+
+    st.markdown("---")
+    st.subheader("3. Median metric by region × PFP")
+    if platform == "GitHub":
+        metric_options = [m for m in
+                          ['total_contributions', 'followers', 'total_stars',
+                           'public_repos', 'commits', 'prs']
+                          if m in panel_src.columns]
+    else:
+        metric_options = [m for m in ['rating', 'maxRating']
+                          if m in panel_src.columns]
+    if not metric_options:
+        st.info("No comparable metric available on this platform.")
+    else:
+        metric = st.selectbox("Metric", metric_options, key='regcmp_metric')
+        med = panel_src.groupby(['region', 'profile_type'], observed=True)[metric].median().reset_index()
+        med = med[med['region'].isin(panel_order)]
+        fig = px.bar(
+            med, x='region', y=metric, color='profile_type',
+            category_orders={'profile_type': ORDER, 'region': panel_order},
+            color_discrete_map=COLORS, barmode='group', text_auto='.0f',
+            title=f"{platform} — median {metric} by region × PFP",
+            labels={metric: f"median {metric}"},
+        )
+        fig.update_layout(height=520, legend_title_text='PFP Type', xaxis_tickangle=-25)
+        st.plotly_chart(fig, width='stretch')
+
+        st.markdown("---")
+        st.subheader(f"4. Anime vs NonAnime — {metric} effect size (Cliff's δ) per region")
+        rows = []
+        for region in panel_order:
+            sub = panel_src[panel_src['region'] == region]
+            anime = sub[sub['profile_type'] == 'Anime'][metric].dropna().to_numpy()
+            non_anime = sub[sub['profile_type'] != 'Anime'][metric].dropna().to_numpy()
+            if len(anime) < 10 or len(non_anime) < 10:
+                continue
+            d, p = cliff_delta(pd.Series(anime), pd.Series(non_anime))
+            rows.append({
+                'region': region,
+                'n_anime': len(anime),
+                'n_other': len(non_anime),
+                'median_anime': float(pd.Series(anime).median()),
+                'median_other': float(pd.Series(non_anime).median()),
+                "Cliff's δ": round(d, 3),
+                'effect': effect_label(d),
+                'p': p,
+                'sig': sig_stars(p),
+            })
+        if rows:
+            eff_df = pd.DataFrame(rows)
+            fig = px.bar(
+                eff_df, x='region', y="Cliff's δ", color='effect',
+                category_orders={'region': panel_order},
+                text="Cliff's δ",
+                title=f"{platform} — Anime vs NonAnime δ on {metric}",
+            )
+            fig.add_hline(y=0, line_color='gray')
+            fig.add_hline(y=0.147, line_dash='dot', annotation_text='small', line_color='gray')
+            fig.add_hline(y=0.33, line_dash='dot', annotation_text='medium', line_color='gray')
+            fig.add_hline(y=0.474, line_dash='dot', annotation_text='large', line_color='gray')
+            fig.update_traces(textposition='outside')
+            fig.update_layout(height=460, xaxis_tickangle=-25)
+            st.plotly_chart(fig, width='stretch')
+            eff_df['p'] = eff_df['p'].apply(lambda v: f"{v:.2e}")
+            st.dataframe(eff_df, width='stretch', hide_index=True)
+        else:
+            st.info("Not enough per-region samples (need ≥10 in each Anime/NonAnime).")
 
