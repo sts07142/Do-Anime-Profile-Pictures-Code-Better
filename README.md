@@ -10,6 +10,8 @@ We analyzed **45,715 GitHub users** and **48,611 Codeforces users**, classified 
 
 **Short answer**: No, once you compare apples to apples. The "Anime PFP ⇒ higher activity" effect that shows up in raw Anime-vs-NonAnime comparisons is almost entirely the *Default-vs-everyone-else* gap. Once you exclude Default-PFP users, **Anime users are statistically indistinguishable from Human / Other users on GitHub `total_contributions`** (δ ≈ −0.03, negligible). On **Codeforces `rating`**, however, once we CLIP-verify the CF Anime labels too (removing YOLO false-positive photos), Anime shows a **small but robust edge over Human** (δ = +0.18) — so *activity* shows no difference but *skill rating* shows a small one. Both conclusions hold even after 20% adversarial classification noise (see [Sensitivity](#classification-error-sensitivity-does-the-headline-survive-20-mislabeling)).
 
+![Significance vs effect size — same p<0.001, opposite conclusions](figures/significance_vs_effect_size.png)
+
 ## Research Questions
 
 | RQ | Platform | Question | This study's answer |
@@ -33,6 +35,8 @@ Codeforces *skill rating*.
 
 ### Headline — GitHub `total_contributions` by 4-cat (n = 45,715)
 
+![Median total_contributions by category — Default dominates the gap](figures/total_contributions_by_cat.png)
+
 `total_contributions` = commits + PRs + issues + reviews in the last year (GraphQL).
 
 | Category | n | median | mean | p75 |
@@ -45,6 +49,8 @@ Codeforces *skill rating*.
 **Kruskal–Wallis 4-group**: H = 9523.0, p < 1e-300 ***
 
 ### Pairwise Cliff's δ (GitHub `total_contributions`)
+
+![Pairwise Cliff's δ heatmap — only Default loses decisively](figures/effect_size_heatmap.png)
 
 | Pair | δ | size | p |
 |---|---:|---|---:|
@@ -67,7 +73,11 @@ Read this carefully:
   activity" — survives only in the trivial sense that "having any PFP at
   all" correlates with higher activity than "having the default Gravatar."
 
+![Anime vs Human Cliff's δ across 9 GitHub activity metrics — all negligible](figures/anime_vs_human_9metrics.png)
+
 ### PFP distribution
+
+![PFP share by category — GitHub vs Codeforces](figures/pfp_distribution.png)
 
 | Platform | n | Anime | Human | Other | Default |
 |----------|------:|------:|------:|------:|--------:|
@@ -79,6 +89,8 @@ abstract icons typical for competitive-programming profiles). Real-face
 Human PFPs are rare on CF (8.7%) compared to GitHub (34.6%).
 
 ### Region breakdown — median `total_contributions` (GitHub)
+
+![Anime vs Human δ by region — all negligible](figures/region_anime_vs_human_delta.png)
 
 | Region | n | Anime | Human | Other | Default |
 |---|---:|---:|---:|---:|---:|
@@ -103,7 +115,9 @@ See `data/processed/analysis_total_contrib.md` for full per-region Cliff's δ
 tables and CF cross-platform context (regenerate with
 `python scripts/analyze_total_contrib.py`).
 
-### RQ2 — Codeforces (Anime share by rank, unchanged)
+### RQ2 — Codeforces (Anime share by rank)
+
+![Codeforces rank vs Anime share — rises monotonically through grandmaster](figures/cf_anime_by_rank.png)
 
 | Rank | n | Anime % |
 |------|---:|-------:|
@@ -126,6 +140,8 @@ here purely as a directional cross-check.
 
 ### CF rating × 4-cat — a small Anime edge (where GitHub had none)
 
+![Median CF rating by category — Anime sits above Human/Other after CLIP verification](figures/cf_rating_by_cat.png)
+
 | Category | n | median rating | mean | p75 |
 |---|---:|---:|---:|---:|
 | Anime   |  8,670 | **1,204** | 1,218 | 1,447 |
@@ -141,6 +157,8 @@ pattern diverges from GitHub. Caveat: part of the gap is a composition effect
 (low-rated mislabels joining Human dragged its median down from 1,131 to 1,064).
 
 ### Classification-error sensitivity (does the headline survive ~20% mislabeling?)
+
+![Anime vs Human δ across 5 sensitivity scenarios — stable across both platforms](figures/sensitivity.png)
 
 `scripts/sensitivity_analysis.py` re-runs the headline δ under five
 robustness scenarios. Short version: **yes, the conclusion is stable** —
@@ -201,6 +219,8 @@ out in §4 of `analysis_sensitivity.md` and listed under Future Work.
 
 ### Classification Pipeline
 
+![YOLO confidence threshold tuning — Macro-F1 vs conf](figures/conf_threshold_tuning.png)
+
 Profile images are classified into four categories using **YOLOv8 anime-face
 detection** followed by **CLIP zero-shot verification** (anime vs real human):
 
@@ -212,6 +232,8 @@ detection** followed by **CLIP zero-shot verification** (anime vs real human):
 | **Other** | Exclusion | YOLO did not detect a face — logos, scenery, abstract art, anything without a recognizable face |
 
 ### Sampling Strategy
+
+![PFP distribution by sampling group — strong confounder (Cramér's V = 0.318)](figures/sampling_group_distribution.png)
 
 GitHub users are collected via 8 stratified groups (~1,700 per group, configurable) to ensure diversity:
 
