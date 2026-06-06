@@ -14,7 +14,10 @@ wheels/
 .env
 
 # Data (too large for git — see README for setup)
-data/
+# Ignore the children of data/ (raw, processed, avatars…) but allow the
+# public, de-identified subset under data/public/ (see scripts/anonymize_for_commit.py).
+data/*
+!data/public/
 
 # Model weights
 *.pt
